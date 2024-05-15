@@ -15,11 +15,15 @@ class GrabFoodScraper:
         self.location = location
         self.driver = self._initialize_driver()
         self.restaurants_response_data = []
+        self.delivery_fee = 0
+        self.total_delivery_fee_accounted = 0
+        self.estimated_delivery_time = 0
+        self.total_delivery_time_accounted = 0
 
     def _initialize_driver(self):
-        PROXY = "50.223.239.166"
+        # PROXY = "50.223.239.166"
         options = webdriver.ChromeOptions()
-        options.add_argument('--proxy-server=%s' % PROXY)
+        # options.add_argument('--proxy-server=%s' % PROXY)
         options.add_argument("--incognito")
         driver = webdriver.Chrome(options=options)
         driver.get(self.url)
@@ -56,6 +60,7 @@ class GrabFoodScraper:
     def _capture_restaurant_data(self):
         for req in self.driver.requests:
             if req.method == 'POST' and req.url == "https://portal.grab.com/foodweb/v2/search":
+                print(req.response.status_code)
                 data = sw_decode(req.response.body,
                                  req.response.headers.get('Content-Encoding', 'identity'))  # decode the response
                 data = data.decode("utf8")  # decode the response
@@ -64,7 +69,6 @@ class GrabFoodScraper:
     def _extract_restaurant_info(self):
         print(self.restaurants_response_data)
         unique_restaurants = {}
-        delivery_info = {}
 
         for restaurant_data in self.restaurants_response_data:
             restaurant_data = restaurant_data["searchResult"]["searchMerchants"]
@@ -74,61 +78,65 @@ class GrabFoodScraper:
                     side_labels_data = restaurant["sideLabels"].get("data", [])
                     if side_labels_data:
                         promotional_offers = [label.get("type") for label in side_labels_data]
+                        restaurant["merchantBrief"]["hasPromo"] = True
 
                 restaurant_id = restaurant["id"]
-                delivery_fee = restaurant.get("deliveryFee")
-                estimated_delivery_time = restaurant.get("estimatedDeliveryTime")
 
                 if restaurant_id not in unique_restaurants:
+                    current_delivery_fee = restaurant["estimatedDeliveryFee"].get(
+                        "price", None
+                    ) if "estimatedDeliveryFee" in restaurant else None
+
+                    if current_delivery_fee:
+                        self.delivery_fee += current_delivery_fee
+                        self.total_delivery_fee_accounted += 1
+
+                    current_delivery_time = restaurant.get("estimatedDeliveryTime")
+
+                    if current_delivery_time:
+                        self.estimated_delivery_time += restaurant.get("estimatedDeliveryTime")
+                        self.total_delivery_time_accounted += 1
+
                     unique_restaurants[restaurant_id] = {
                         "Restaurant Name": restaurant["address"]["name"],
                         "Restaurant Cuisine": ", ".join(restaurant["merchantBrief"]["cuisine"]),
                         "Restaurant Rating": restaurant["merchantBrief"].get("rating", None),
-                        "Estimate time of Delivery": restaurant.get("estimatedDeliveryTime", None),
+                        "Estimate time of Delivery": current_delivery_time,
                         "Restaurant Distance from Delivery Location": restaurant["merchantBrief"].get("distanceInKm",
                                                                                                       None),
                         "Is promo available": restaurant["merchantBrief"].get("hasPromo", False),
                         "Restaurant latitude": restaurant["latlng"]["latitude"],
                         "Restaurant longitude": restaurant["latlng"]["longitude"],
-                        "Estimate Delivery Fee": restaurant["estimatedDeliveryFee"].get("price",
-                                                                                        None) if "estimatedDeliveryFee" in restaurant else None,
+                        "Estimate Delivery Fee": current_delivery_fee,
                         "Restaurant Image Link": restaurant["merchantBrief"].get("photoHref", False),
                         "Promotional Offers": promotional_offers,
                     }
-
-                if restaurant_id not in delivery_info:
-                    delivery_info[restaurant_id] = {
-                        "Delivery Fee": delivery_fee,
-                        "Estimated Delivery Time": estimated_delivery_time
-                    }
-
-        return unique_restaurants, delivery_info
+        return unique_restaurants
 
     def scrape_and_save(self, output_csv):
         self._enter_location_and_submit()
         self._scroll_to_bottom()
         self._capture_restaurant_data()
-        unique_restaurants, delivery_info = self._extract_restaurant_info()
+        unique_restaurants = self._extract_restaurant_info()
 
-        print(type(unique_restaurants))
-        print(unique_restaurants)
-
-        print(type(delivery_info))
-        print(delivery_info)
-
-        fieldnames = ["Restaurant ID"] + list(list(unique_restaurants.values())[0].keys()) + list(list(delivery_info.values())[
-        0].keys())
+        fieldnames = ["Restaurant ID"] + list(list(unique_restaurants.values())[0].keys())
 
         with open(output_csv, mode='w', newline='', encoding='utf-8') as file:
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writeheader()
 
             for restaurant_id, restaurant_data in unique_restaurants.items():
-                row = {"Restaurant ID": restaurant_id, **restaurant_data, **delivery_info[restaurant_id]}
+                row = { "Restaurant ID": restaurant_id, **restaurant_data }
                 writer.writerow(row)
 
         print("Extraction and saving completed successfully.")
         self.driver.quit()
+
+    def get_average_delivery_time(self):
+        print("Average Delivery Time: ", self.estimated_delivery_time / self.total_delivery_time_accounted, "\n")
+
+    def get_average_delivery_fee(self):
+        print("Average Delivery Fee: ", self.delivery_fee / self.total_delivery_fee_accounted)
 
 
 if __name__ == "__main__":
@@ -138,3 +146,5 @@ if __name__ == "__main__":
 
     scraper = GrabFoodScraper(url, location)
     scraper.scrape_and_save(output_csv)
+    scraper.get_average_delivery_time()
+    scraper.get_average_delivery_fee()
