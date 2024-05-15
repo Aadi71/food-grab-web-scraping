@@ -1,6 +1,9 @@
 import time
 import csv
 import json
+import gzip
+import requests
+from bs4 import BeautifulSoup as bs
 from seleniumwire import webdriver
 from seleniumwire.utils import decode as sw_decode
 from selenium.common.exceptions import TimeoutException
@@ -10,9 +13,11 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 class GrabFoodScraper:
-    def __init__(self, url, location):
-        self.url = url
+    def __init__(self, food_grab_url, location):
+        # Initializing class attributes
+        self.url = food_grab_url
         self.location = location
+        self.proxy = self._get_free_proxy()
         self.driver = self._initialize_driver()
         self.restaurants_response_data = []
         self.delivery_fee = 0
@@ -20,10 +25,32 @@ class GrabFoodScraper:
         self.estimated_delivery_time = 0
         self.total_delivery_time_accounted = 0
 
+    def _get_free_proxy(self):
+        url = "https://free-proxy-list.net/" # Website that provides free IPs
+        # Scrapping the table containing IPs
+        soup = bs(requests.get(url).content, 'html.parser')
+        for row in soup.find("table", attrs={"class": "table-striped"}).find_all("tr")[1:]:
+            tds = row.find_all("td")
+            try:
+                ip = tds[0].text.strip()
+                port = tds[1].text.strip()
+                proxy = str(ip) + ":" + str(port)
+                '''
+                Checking the response of IP to know if it is available or not, as the website free IPs are used
+                extensively, this will help us to reach the food grab website without exhausting single IP
+                Note: Right now, single IP is getting used as a base IP, later we can make it more robust in rotation
+                '''
+                response = requests.get("http://httpbin.org/ip", proxies={"http": proxy, "https": proxy}, timeout=10)
+                # As soon as we get the IP available and working, we return it
+                if response.status_code == 200:
+                    return proxy
+            except IndexError:
+                continue
+        return None
     def _initialize_driver(self):
-        # PROXY = "50.223.239.166"
         options = webdriver.ChromeOptions()
-        # options.add_argument('--proxy-server=%s' % PROXY)
+        # Initializing the driver with target IP proxy
+        options.add_argument('--proxy-server=%s' % self.proxy)
         options.add_argument("--incognito")
         driver = webdriver.Chrome(options=options)
         driver.get(self.url)
@@ -35,6 +62,10 @@ class GrabFoodScraper:
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".ant-layout")))
         return driver
 
+    '''
+    Below method is used to go to the page of given location,
+    by manually automating the browser to perform the behaviour. That's what Selenium is getting used for :)
+    '''
     def _enter_location_and_submit(self):
         location_input = self.driver.find_element(By.ID, 'location-input')
         location_input.click()
@@ -47,6 +78,9 @@ class GrabFoodScraper:
 
         WebDriverWait(self.driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".ant-layout")))
 
+    '''
+    All the 'v2/search' APIs are called when we perform infinite scrolling, i.e. Pagination
+    '''
     def _scroll_to_bottom(self):
         last_height = self.driver.execute_script("return document.body.scrollHeight")
         while True:
@@ -57,23 +91,31 @@ class GrabFoodScraper:
                 break
             last_height = new_height
 
+    '''
+    As, we know we have made all XHR requests to get list of restaurants for the given location
+    Now, it's time to fetch the data from its response
+    '''
     def _capture_restaurant_data(self):
         for req in self.driver.requests:
             if req.method == 'POST' and req.url == "https://portal.grab.com/foodweb/v2/search":
-                print(req.response.status_code)
+                # Fun fact, the response without encoding will make you dizzy :|
                 data = sw_decode(req.response.body,
-                                 req.response.headers.get('Content-Encoding', 'identity'))  # decode the response
-                data = data.decode("utf8")  # decode the response
+                                 req.response.headers.get('Content-Encoding', 'identity'))
+                data = data.decode("utf8")
                 self.restaurants_response_data.append(json.loads(data))
 
     def _extract_restaurant_info(self):
-        print(self.restaurants_response_data)
         unique_restaurants = {}
 
         for restaurant_data in self.restaurants_response_data:
+            # Digging down into the response to fetch the necessary details
             restaurant_data = restaurant_data["searchResult"]["searchMerchants"]
             for restaurant in restaurant_data:
                 promotional_offers = None
+                '''
+                sideLabels only exists for those having promo codes, thus made the logic for
+                has promo code dependent on the same rather than digging to promo -> hasPromo
+                '''
                 if "sideLabels" in restaurant:
                     side_labels_data = restaurant["sideLabels"].get("data", [])
                     if side_labels_data:
@@ -82,7 +124,12 @@ class GrabFoodScraper:
 
                 restaurant_id = restaurant["id"]
 
+                # Added this condition to add only unique data, if the response may have repetition
                 if restaurant_id not in unique_restaurants:
+                    '''
+                    Below steps are to calculate the average delivery fee and time, and only account those
+                    in frequency for which value exists
+                    '''
                     current_delivery_fee = restaurant["estimatedDeliveryFee"].get(
                         "price", None
                     ) if "estimatedDeliveryFee" in restaurant else None
@@ -96,7 +143,7 @@ class GrabFoodScraper:
                     if current_delivery_time:
                         self.estimated_delivery_time += restaurant.get("estimatedDeliveryTime")
                         self.total_delivery_time_accounted += 1
-
+                    # Creating the extracted data object
                     unique_restaurants[restaurant_id] = {
                         "Restaurant Name": restaurant["address"]["name"],
                         "Restaurant Cuisine": ", ".join(restaurant["merchantBrief"]["cuisine"]),
@@ -113,23 +160,31 @@ class GrabFoodScraper:
                     }
         return unique_restaurants
 
-    def scrape_and_save(self, output_csv):
+    def scrape_and_save(self, output_csv, output_gzip):
         self._enter_location_and_submit()
         self._scroll_to_bottom()
         self._capture_restaurant_data()
         unique_restaurants = self._extract_restaurant_info()
 
+        print("Extraction and saving completed successfully.")
+
+        # Converting it into list because the data type after conversion results into dictionary
         fieldnames = ["Restaurant ID"] + list(list(unique_restaurants.values())[0].keys())
+
+        with gzip.open(output_gzip, 'wt', encoding='utf-8') as f:
+            json.dump(unique_restaurants, f, indent=4)  # 4 is my choice for indentation, looks good :)
+
+        print("Data stored in Gzip JSON File and saved successfully.")
 
         with open(output_csv, mode='w', newline='', encoding='utf-8') as file:
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writeheader()
 
             for restaurant_id, restaurant_data in unique_restaurants.items():
-                row = { "Restaurant ID": restaurant_id, **restaurant_data }
+                row = {"Restaurant ID": restaurant_id, **restaurant_data}
                 writer.writerow(row)
 
-        print("Extraction and saving completed successfully.")
+        print("Data stored in CSV File and saved successfully.")
         self.driver.quit()
 
     def get_average_delivery_time(self):
@@ -140,11 +195,14 @@ class GrabFoodScraper:
 
 
 if __name__ == "__main__":
-    url = "https://food.grab.com/sg/en/"
+    food_grab_url = "https://food.grab.com/sg/en/"
     location = "PT Singapore - Choa Chu Kang North 6, Singapore, 689577"
-    output_csv = "aadi_unique_restaurant_data.csv"
+    output_csv = "unique_restaurant_data.csv"
+    output_gzip = "unique_restaurant_data.json.gz"
 
-    scraper = GrabFoodScraper(url, location)
-    scraper.scrape_and_save(output_csv)
+    scraper = GrabFoodScraper(food_grab_url, location)
+    scraper.scrape_and_save(output_csv, output_gzip)
     scraper.get_average_delivery_time()
     scraper.get_average_delivery_fee()
+
+# Implemented by Aadi Jain ^-^
