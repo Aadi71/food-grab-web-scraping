@@ -54,7 +54,7 @@ The scraper extracts the following fields/column data visible on the Grab Food D
 ### Improvements and Optimizations
 1. **Error Handling**: Implement more robust error handling mechanisms to handle edge cases gracefully.
 2. **Proxy Rotation**: Introduce proxy rotation in more efficient way, right now I am only doing the rotation at the very first step.
-3. **Multi-Processing**: I am only doing multiprocessing onto the extracted data I can make it do from the scrapping step as well.
+3. **Multi-Processing**: This can be much better if given time, I will try to optimize it more.
 
 ## Execution Steps 🚀
 ```bash
