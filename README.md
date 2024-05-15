@@ -2,6 +2,9 @@
 
 This project aims to develop a web scraper to extract specific information from the Grab Food Delivery platform.
 
+### One View Objective, Approach, Challenges, and Go-to strategy look
+<img width="864" alt="image" src="https://github.com/Aadi71/food-grab-web-scraping/assets/73948412/1a5876fb-b826-4d03-9ece-7f6053195769">
+
 ## Table of Contents
 1. [Introduction](#introduction)
 2. [Tasks](#tasks)
